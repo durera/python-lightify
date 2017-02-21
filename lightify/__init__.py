@@ -82,25 +82,51 @@ class Luminary(object):
 
 
 class Light(Luminary):
-    def __init__(self, conn, logger, addr, name):
+    def __init__(self, conn, logger, id, addr, type, name):
         super(Light, self).__init__(conn, logger, name)
         self.__logger = logger
         self.__conn = conn
+        self.__id = id
         self.__addr = addr
+        self.__type = type
+
+    def id(self):
+        return self.__id
 
     def addr(self):
         return self.__addr
 
+    def mac(self):
+        # Convert MAC Address - http://stackoverflow.com/a/11006780
+        return '-'.join(format(self.__addr, 'x')[i:i+2] for i in range(0,16,2))
+
+    def type(self):
+        return self.__type
+
     def __str__(self):
         return "<light: %s>" % self.name()
 
-    def update_status(self, on, lum, temp, r, g, b):
-        self.__on = on
-        self.__lum = lum
+    def update_status(self, fwVersion, online, groupId, status, luminance, temp, red, green, blue, alpha, name):
+        self.__fwVersion = fwVersion
+        self.__online = online
+        self.__groupId = groupId
+        self.__on = status
+        self.__lum = luminance
         self.__temp = temp
-        self.__r = r
-        self.__g = g
-        self.__b = b
+        self.__r = red
+        self.__g = green
+        self.__b = blue
+        self.__alpha = alpha
+        self.__name = name
+
+    def fwVersion(self):
+        return self.__fwVersion
+    
+    def online(self):
+        return self.__online
+
+    def groupId(self):
+        return self.__groupId
 
     def on(self):
         return self.__on
@@ -147,6 +173,9 @@ class Light(Luminary):
 
     def blue(self):
         return self.__b
+
+    def alpha(self):
+        return self.__alpha
 
     def build_command(self, command, data):
         return self.__conn.build_light_command(command, self, data)
@@ -430,6 +459,7 @@ class Lightify:
         data = self.build_all_light_status(1)
         self.send(data)
         data = self.recv()
+        # Unsigned short (H), little endian (<) .. indicates how many rows there are to process
         (num,) = struct.unpack("<H", data[7:9])
 
         self.__logger.debug('num: %d', num)
@@ -441,33 +471,70 @@ class Lightify:
         for i in range(0, num):
             pos = 9 + i * status_len
             payload = data[pos:pos+status_len]
+            
+            # ID - unsigned short (2)
+            (id,) = struct.unpack("<H", payload[0:2])
+            
+            # MAC - unsigned long (8)
+            (mac,) = struct.unpack("<Q16", payload[2:10])
+            
+            # Convert MAC Address - http://stackoverflow.com/a/11006780
+            macFriendly = '-'.join(format(mac, 'x')[i:i+2] for i in range(0,16,2))
+            
+            # Type - unsigned char (1)
+            (type,) = struct.unpack("<B", payload[10:11])
 
-            self.__logger.debug("%d %d %d", i, pos, len(payload))
+            # Firmware Version - unsigned int, big endian (1)
+            (fwVersion,) = struct.unpack(">I", payload[11:15])
+            
+            # Online status - unsigned char (1)
+            (online,) = struct.unpack("<B", payload[15:16])
 
-            (a, addr, stat, name, extra) = struct.unpack("<HQ16s16sQ", payload)
+            # Group Id - unsigned short (2)
+            (groupId,) = struct.unpack("<H", payload[16:18])
+            
+            # Status - unsigned char (1)
+            (status,) = struct.unpack("<B", payload[18:19])
+            
+            # Brightness, Temperature - unsigned char (1), unsigned short (2)
+            (brightness,temp) = struct.unpack("<BH", payload[19:22])
+
+            # Red, Green, Blue, Alpha - unsigned char (1), unsigned char (1), unsigned char (1), unsigned char (1)
+            (red, green, blue, alpha) = struct.unpack("<BBBB", payload[22:26])
+
+            name = payload[26:42]
             try:
                 name = name.replace('\0', "")
             except TypeError:
                 # Decode using cp437 for python3. This is not UTF-8
                 name = name.decode('cp437').replace('\0', "")
-
-            self.__logger.debug('light: %x %x %s %x', a, addr, name, extra)
-            if addr in old_lights:
-                light = old_lights[addr]
+            
+            # No idea what this part of the payload is
+            (unknown,) = struct.unpack("<Q", payload[42:50])
+            
+            self.__logger.debug("id = %s" % id)
+            self.__logger.debug("mac = %s" % mac)
+            self.__logger.debug("mac friendly = %s" % macFriendly)
+            self.__logger.debug("type = %s" % type)
+            self.__logger.debug("fw = %s" % fwVersion)
+            self.__logger.debug("online = %s" % online)
+            self.__logger.debug("groupId = %s" % groupId)
+            self.__logger.debug("status = %s" % status)
+            self.__logger.debug("brightness = %s" % brightness)
+            self.__logger.debug("temp = %s" % temp)
+            self.__logger.debug("red green blue = %s %s %s" % (red, green, blue))
+            self.__logger.debug("alpha = %s" % alpha)
+            self.__logger.debug("name = %s" % name)
+            self.__logger.debug("unknown = %s" % unknown)
+            
+            self.__logger.debug('light: %s %s', macFriendly, name)
+            if mac in old_lights:
+                light = old_lights[mac]
             else:
-                light = Light(self, self.__logger, addr, name)
+                light = Light(self, self.__logger, id, mac, type, name)
 
-            (b, on, lum, temp, r, g, b, h) = struct.unpack("<Q2BH4B", stat)
-            self.__logger.debug('status: %x %0x', b, h)
-            self.__logger.debug('onoff: %d', on)
-            self.__logger.debug('temp:  %d', temp)
-            self.__logger.debug('lum:   %d', lum)
-            self.__logger.debug('red:   %d', r)
-            self.__logger.debug('green: %d', g)
-            self.__logger.debug('blue:  %d', b)
-
-            light.update_status(on, lum, temp, r, g, b)
-            new_lights[addr] = light
+            light.update_status(fwVersion, online, groupId, status, brightness, temp, red, green, blue, alpha, name)
+            new_lights[mac] = light
         # return (on, lum, temp, r, g, b)
 
         self.__lights = new_lights
